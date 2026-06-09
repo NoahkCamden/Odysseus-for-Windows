@@ -61,6 +61,9 @@ _BUILTIN_NPX_SERVERS = {
     },
 }
 
+# Keep NPX servers lazy by default so startup remains focused on chat readiness.
+EAGER_NPX_BUILTINS = os.environ.get("ODYSSEUS_EAGER_NPX_BUILTINS", "").lower() in ("1", "true", "yes")
+
 # Global flag to disable MCP if there are compatibility issues
 MCP_DISABLED = os.environ.get("ODYSSEUS_DISABLE_MCP", "").lower() in ("1", "true", "yes")
 
@@ -101,34 +104,48 @@ async def register_builtin_servers(mcp_manager):
             continue
         asyncio.create_task(_connect_python_server(server_id, script_path, name))
 
-    # Register NPX-based servers in the background (they take longer to start)
+    # NPX servers (browser) are lazy by default. They can still be enabled for
+    # eager startup via env when desired.
+    if EAGER_NPX_BUILTINS:
+        async def _start_npx_servers():
+            await asyncio.sleep(3)  # let Python servers finish first
+            for server_id in _BUILTIN_NPX_SERVERS:
+                await connect_builtin_npx_server(mcp_manager, server_id)
+
+        asyncio.create_task(_start_npx_servers())
+    else:
+        logger.info("Built-in NPX MCP servers are lazy (set ODYSSEUS_EAGER_NPX_BUILTINS=true to eager-start)")
+
+
+async def connect_builtin_npx_server(mcp_manager, server_id: str, timeout: float = 30) -> bool:
+    """Connect one NPX-based built-in MCP server on demand."""
+    cfg = _BUILTIN_NPX_SERVERS.get(server_id)
+    if not cfg:
+        logger.warning(f"Unknown built-in NPX MCP server: {server_id}")
+        return False
     npx_path = _find_npx()
-    logger.info(f"NPX binary resolved to: {npx_path}")
-
-    async def _start_npx_servers():
-        await asyncio.sleep(3)  # let Python servers finish first
-        for server_id, cfg in _BUILTIN_NPX_SERVERS.items():
-            try:
-                logger.info(f"Starting NPX server: {cfg['name']} ({npx_path} {' '.join(cfg['args'])})")
-                ok = await asyncio.wait_for(
-                    mcp_manager.connect_server(
-                        server_id=server_id,
-                        name=cfg["name"],
-                        transport="stdio",
-                        command=npx_path,
-                        args=cfg["args"],
-                    ),
-                    timeout=30,
-                )
-                if ok:
-                    logger.info(f"Built-in NPX server registered: {cfg['name']}")
-                else:
-                    logger.warning(f"Built-in NPX server failed to connect: {cfg['name']}")
-            except asyncio.TimeoutError:
-                logger.warning(f"Built-in NPX server timed out: {cfg['name']}")
-            except asyncio.CancelledError:
-                raise
-            except BaseException as e:
-                logger.warning(f"Built-in NPX server {cfg['name']} error: {type(e).__name__}: {e}")
-
-    asyncio.create_task(_start_npx_servers())
+    try:
+        logger.info(f"Starting NPX server: {cfg['name']} ({npx_path} {' '.join(cfg['args'])})")
+        ok = await asyncio.wait_for(
+            mcp_manager.connect_server(
+                server_id=server_id,
+                name=cfg["name"],
+                transport="stdio",
+                command=npx_path,
+                args=cfg["args"],
+            ),
+            timeout=timeout,
+        )
+        if ok:
+            logger.info(f"Built-in NPX server registered: {cfg['name']}")
+        else:
+            logger.warning(f"Built-in NPX server failed to connect: {cfg['name']}")
+        return ok
+    except asyncio.TimeoutError:
+        logger.warning(f"Built-in NPX server timed out: {cfg['name']}")
+        return False
+    except asyncio.CancelledError:
+        raise
+    except BaseException as e:
+        logger.warning(f"Built-in NPX server {cfg['name']} error: {type(e).__name__}: {e}")
+        return False

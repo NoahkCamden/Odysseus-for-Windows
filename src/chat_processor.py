@@ -47,11 +47,42 @@ class ChatProcessor:
         self.personal_docs_manager = personal_docs_manager
         self.memory_vector = memory_vector
         self.skills_manager = skills_manager
+        self._memory_feature_cache = {}
 
     # Minimum similarity score for RAG results to be injected
     RAG_SIMILARITY_THRESHOLD = 0.35
 
-    def _hybrid_retrieve(self, message: str, mem_entries: list, k: int = 5) -> list:
+    def _get_memory_features(self, mem_entries: list, owner: Optional[str] = None) -> Dict[str, Any]:
+        cache_token = None
+        if hasattr(self.memory_manager, "get_cache_token"):
+            cache_token = self.memory_manager.get_cache_token()
+        key = (owner, cache_token, tuple(mem.get("id") for mem in mem_entries if mem.get("id")))
+        cached = self._memory_feature_cache.get(key)
+        if cached is not None:
+            return cached
+
+        doc_freq = Counter()
+        mem_token_cache = {}
+        total_token_count = 0
+        for mem in mem_entries:
+            toks = set(_content_tokens(mem["text"]))
+            mem_token_cache[mem["id"]] = toks
+            total_token_count += len(toks)
+            for token in toks:
+                doc_freq[token] += 1
+
+        features = {
+            "count": len(mem_entries),
+            "doc_freq": doc_freq,
+            "mem_token_cache": mem_token_cache,
+            "avg_len": max(total_token_count / max(len(mem_entries), 1), 1),
+        }
+        if len(self._memory_feature_cache) >= 32:
+            self._memory_feature_cache.clear()
+        self._memory_feature_cache[key] = features
+        return features
+
+    def _hybrid_retrieve(self, message: str, mem_entries: list, k: int = 5, owner: Optional[str] = None) -> list:
         """Retrieve memories relevant to the message.
 
         Uses BM25-style keyword scoring + optional vector similarity.
@@ -70,14 +101,11 @@ class ChatProcessor:
                 return []
 
         # ── Build IDF from the memory corpus ──
-        N = len(mem_entries)
-        doc_freq = Counter()  # token -> how many memories contain it
-        mem_token_cache = {}  # mem_id -> set of content tokens
-        for mem in mem_entries:
-            toks = set(_content_tokens(mem["text"]))
-            mem_token_cache[mem["id"]] = toks
-            for t in toks:
-                doc_freq[t] += 1
+        features = self._get_memory_features(mem_entries, owner=owner)
+        N = features["count"]
+        doc_freq = features["doc_freq"]
+        mem_token_cache = features["mem_token_cache"]
+        avg_len = features["avg_len"]
 
         def _bm25_score(query_toks, mem_id):
             """BM25-inspired score between query and a memory."""
@@ -86,7 +114,6 @@ class ChatProcessor:
                 return 0.0
             score = 0.0
             mem_len = len(mem_toks)
-            avg_len = max(sum(len(v) for v in mem_token_cache.values()) / N, 1)
             k1, b = 1.5, 0.75
             for qt in query_toks:
                 if qt not in mem_toks:
@@ -211,7 +238,7 @@ class ChatProcessor:
                         _used_ids.append(m["id"])
 
             if extended:
-                relevant = self._hybrid_retrieve(message, extended, k=3)
+                relevant = self._hybrid_retrieve(message, extended, k=3, owner=owner)
                 if relevant:
                     ext_text = "\n".join([f"- {m['text']}" for m in relevant])
                     preface.append(untrusted_context_message(

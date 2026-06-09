@@ -24,6 +24,79 @@ from src.search import update_search_config
 
 logger = logging.getLogger(__name__)
 
+
+class LazyMemoryVectorStore:
+    """Delay memory-vector initialization until a route actually needs it."""
+
+    def __init__(self, data_dir: str, embedding_model=None):
+        self._data_dir = data_dir
+        self._embedding_model = embedding_model
+        self._store = None
+        self._init_attempted = False
+
+    def _get_store(self):
+        if self._store is not None:
+            return self._store
+        if self._init_attempted:
+            return None
+        from src.embeddings import embedding_backend_likely_available
+
+        if not embedding_backend_likely_available():
+            return None
+
+        self._init_attempted = True
+        try:
+            from src.memory_vector import MemoryVectorStore
+            self._store = MemoryVectorStore(self._data_dir, embedding_model=self._embedding_model)
+            if self._store and self._store.healthy:
+                logger.info("LazyMemoryVectorStore initialized on demand")
+                return self._store
+        except Exception as e:
+            logger.warning(f"LazyMemoryVectorStore init failed: {e}")
+        self._store = None
+        return None
+
+    @property
+    def healthy(self) -> bool:
+        store = self._get_store()
+        return bool(store and store.healthy)
+
+    def count(self) -> int:
+        store = self._get_store()
+        return store.count() if store and store.healthy else 0
+
+    def add(self, *args, **kwargs):
+        store = self._get_store()
+        if store and store.healthy:
+            return store.add(*args, **kwargs)
+
+    def remove(self, *args, **kwargs):
+        store = self._get_store()
+        if store and store.healthy:
+            return store.remove(*args, **kwargs)
+
+    def search(self, *args, **kwargs):
+        store = self._get_store()
+        if store and store.healthy:
+            return store.search(*args, **kwargs)
+        return []
+
+    def find_similar(self, *args, **kwargs):
+        store = self._get_store()
+        if store and store.healthy:
+            return store.find_similar(*args, **kwargs)
+        return None
+
+    def rebuild(self, *args, **kwargs):
+        store = self._get_store()
+        if store and store.healthy:
+            return store.rebuild(*args, **kwargs)
+
+    def clear(self):
+        store = self._get_store()
+        if store and store.healthy and hasattr(store, "clear"):
+            return store.clear()
+
 def create_directories():
     """Create necessary directories if they don't exist."""
     for directory in (DATA_DIR, PERSONAL_DIR, RUNBOOK_DIR, UPLOAD_DIR):
@@ -52,26 +125,9 @@ def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
     api_key_manager = APIKeyManager(DATA_DIR)
     preset_manager = PresetManager(DATA_DIR)
 
-    # Initialize memory vector store (share embedding model with RAG if available)
-    memory_vector = None
-    try:
-        from src.memory_vector import MemoryVectorStore
-        embedding_model = getattr(rag_manager, '_model', None) if rag_manager else None
-        memory_vector = MemoryVectorStore(DATA_DIR, embedding_model=embedding_model)
-        if memory_vector.healthy:
-            # Rebuild index from existing memories if empty
-            if memory_vector.count() == 0:
-                existing = memory_manager.load()
-                if existing:
-                    memory_vector.rebuild(existing)
-                    logger.info(f"Rebuilt memory vector index from {len(existing)} existing entries")
-            logger.info("MemoryVectorStore initialized")
-        else:
-            logger.warning("MemoryVectorStore DEGRADED: ChromaDB vector memory unavailable")
-            memory_vector = None
-    except Exception as e:
-        logger.warning(f"MemoryVectorStore DEGRADED: {e}")
-        memory_vector = None
+    # Defer memory-vector initialization until a request actually needs it.
+    embedding_model = getattr(rag_manager, '_model', None) if rag_manager else None
+    memory_vector = LazyMemoryVectorStore(DATA_DIR, embedding_model=embedding_model)
 
     # Initialize processors
     chat_processor = ChatProcessor(memory_manager, personal_docs_manager, memory_vector=memory_vector, skills_manager=skills_manager)

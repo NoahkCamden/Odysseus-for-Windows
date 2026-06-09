@@ -1,26 +1,72 @@
 """User preferences API — per-user key/value store backed by a JSON file."""
 import json
 import os
+import threading
+import time
 from typing import Optional
 from fastapi import APIRouter, Request
 from src.auth_helpers import get_current_user
 
 PREFS_FILE = os.path.join("data", "user_prefs.json")
+_PREFS_CACHE_TTL_S = 1.0
+_PREFS_CACHE_LOCK = threading.Lock()
+_PREFS_CACHE = {
+    "loaded_at": 0.0,
+    "mtime": None,
+    "size": None,
+    "data": None,
+}
+
+
+def _invalidate_cache():
+    with _PREFS_CACHE_LOCK:
+        _PREFS_CACHE["loaded_at"] = 0.0
+        _PREFS_CACHE["mtime"] = None
+        _PREFS_CACHE["size"] = None
+        _PREFS_CACHE["data"] = None
 
 
 def _load():
     """Load the raw prefs file (internal use only)."""
+    now = time.monotonic()
+    try:
+        st = os.stat(PREFS_FILE)
+        mtime = st.st_mtime
+        size = st.st_size
+    except FileNotFoundError:
+        mtime = None
+        size = None
+
+    with _PREFS_CACHE_LOCK:
+        cached = _PREFS_CACHE.get("data")
+        if (
+            cached is not None
+            and (now - float(_PREFS_CACHE.get("loaded_at", 0.0))) < _PREFS_CACHE_TTL_S
+            and _PREFS_CACHE.get("mtime") == mtime
+            and _PREFS_CACHE.get("size") == size
+        ):
+            return dict(cached)
+
     try:
         with open(PREFS_FILE, "r") as f:
-            return json.load(f)
+            data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+        data = {}
+
+    with _PREFS_CACHE_LOCK:
+        _PREFS_CACHE["loaded_at"] = now
+        _PREFS_CACHE["mtime"] = mtime
+        _PREFS_CACHE["size"] = size
+        _PREFS_CACHE["data"] = data if isinstance(data, dict) else {}
+
+    return dict(_PREFS_CACHE["data"])
 
 
 def _save(prefs):
     os.makedirs(os.path.dirname(PREFS_FILE), exist_ok=True)
     with open(PREFS_FILE, "w") as f:
         json.dump(prefs, f, indent=2)
+    _invalidate_cache()
 
 
 def _load_for_user(user: Optional[str] = None) -> dict:

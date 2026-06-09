@@ -28,6 +28,8 @@ from typing import Dict, Iterable, List, Optional
 from .skill_format import Skill, slugify
 
 logger = logging.getLogger(__name__)
+_SKILLS_LOAD_CACHE: Dict[str, dict] = {}
+_SKILLS_CACHE_TTL_S = 3.0
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +71,12 @@ class SkillsManager:
         self.legacy_file = os.path.join(data_dir, "skills.json")  # back-compat
         os.makedirs(self.skills_root, exist_ok=True)
 
+    def _cache_key(self) -> str:
+        return os.path.abspath(self.skills_root)
+
+    def _invalidate_load_cache(self) -> None:
+        _SKILLS_LOAD_CACHE.pop(self._cache_key(), None)
+
     # ----------------------------------------------------------------------
     # Path helpers
     # ----------------------------------------------------------------------
@@ -104,6 +112,7 @@ class SkillsManager:
             with open(tmp, "w") as f:
                 json.dump(usage, f, indent=2)
             os.replace(tmp, self.usage_file)
+        self._invalidate_load_cache()
 
     def set_audit(self, name: str, verdict: str, by_teacher: bool = False,
                   worker_model: str = "", teacher_model: str = "") -> None:
@@ -161,6 +170,7 @@ class SkillsManager:
         from core.atomic_io import atomic_write_text
         atomic_write_text(path, sk.to_markdown())
         sk.path = path
+        self._invalidate_load_cache()
         return path
 
     def backfill_owner(self, primary_owner: str, valid_owners: Optional[set[str]] = None) -> int:
@@ -199,6 +209,12 @@ class SkillsManager:
 
     def load_all(self) -> List[Dict]:
         """Return every skill as a plain dict, plus any legacy JSON entries."""
+        now = time.monotonic()
+        cache_key = self._cache_key()
+        cached = _SKILLS_LOAD_CACHE.get(cache_key)
+        if cached and (now - cached.get("loaded_at", 0.0)) < _SKILLS_CACHE_TTL_S:
+            return [dict(item) for item in cached.get("data", [])]
+
         usage = self._load_usage()
         out: List[Dict] = []
         seen_names: set[str] = set()
@@ -256,6 +272,11 @@ class SkillsManager:
                         })
             except Exception:
                 pass
+
+        _SKILLS_LOAD_CACHE[cache_key] = {
+            "loaded_at": now,
+            "data": [dict(item) for item in out],
+        }
         return out
 
     def load(self, owner: Optional[str] = None) -> List[Dict]:

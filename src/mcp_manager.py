@@ -8,6 +8,7 @@ Each server exposes tools that are made available to the agent loop.
 import json
 import logging
 import os
+import asyncio
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,15 @@ class McpManager:
         self._sessions: Dict[str, Any] = {}
         # server_id -> exit stack (for cleanup)
         self._stacks: Dict[str, Any] = {}
+        # server_id -> lock to serialize lazy-connect attempts
+        self._connect_locks: Dict[str, asyncio.Lock] = {}
+
+    def _get_connect_lock(self, server_id: str) -> asyncio.Lock:
+        lock = self._connect_locks.get(server_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._connect_locks[server_id] = lock
+        return lock
 
     async def connect_server(
         self,
@@ -207,7 +217,21 @@ class McpManager:
 
         session = self._sessions.get(server_id)
         if not session:
-            return {"error": f"MCP server not connected: {server_id}", "exit_code": 1}
+            if server_id == "builtin_browser":
+                # Lazy-connect browser MCP on first use to keep app startup fast.
+                lock = self._get_connect_lock(server_id)
+                async with lock:
+                    session = self._sessions.get(server_id)
+                    if not session:
+                        try:
+                            from src.builtin_mcp import connect_builtin_npx_server
+                            ok = await connect_builtin_npx_server(self, server_id)
+                            if ok:
+                                session = self._sessions.get(server_id)
+                        except Exception as e:
+                            logger.warning(f"Lazy connect failed for {server_id}: {e}")
+            if not session:
+                return {"error": f"MCP server not connected: {server_id}", "exit_code": 1}
 
         try:
             result = await self._do_call(session, tool_name, arguments)
@@ -266,7 +290,15 @@ class McpManager:
     async def _reconnect_builtin(self, server_id: str) -> bool:
         """Tear down and reconnect a crashed builtin MCP server."""
         import sys
-        from src.builtin_mcp import _BUILTIN_SERVERS
+        from src.builtin_mcp import _BUILTIN_SERVERS, connect_builtin_npx_server
+
+        if server_id == "builtin_browser":
+            await self.disconnect_server(server_id)
+            try:
+                return await connect_builtin_npx_server(self, server_id)
+            except Exception as e:
+                logger.error(f"Failed to reconnect builtin MCP server Built-in: Browser: {e}")
+                return False
 
         if server_id not in _BUILTIN_SERVERS:
             return False

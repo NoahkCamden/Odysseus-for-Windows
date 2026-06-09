@@ -458,6 +458,9 @@ def setup_chat_routes(
             # the outer scope. (Was `nonlocal` but never reassigned.)
             research_sources = None
             web_sources = ctx.web_sources
+            _stream_started_at = time.perf_counter()
+            _llm_dispatch_started_at = None
+            _first_delta_emitted = False
 
             # Register active stream for partial-save safety net
             _active_streams[session] = {"status": "streaming", "partial": "", "query": message, "is_research": do_research, "mode": _effective_mode}
@@ -692,6 +695,8 @@ def setup_chat_routes(
                 return
             elif chat_mode == "chat":
                 _chat_start = time.time()
+                _llm_dispatch_started_at = time.perf_counter()
+                yield f'data: {json.dumps({"type": "stream_timing", "phase": "pre_llm", "data": {"mode": "chat", "ms": round((_llm_dispatch_started_at - _stream_started_at) * 1000.0, 2)}})}\n\n'
                 # ── Chat mode: call stream_llm directly, NO tools, NO document access ──
                 try:
                     _chat_candidates = [(sess.endpoint_url, sess.model, sess.headers)] + _fallback_candidates
@@ -712,6 +717,10 @@ def setup_chat_routes(
                             try:
                                 data = json.loads(chunk[6:])
                                 if "delta" in data:
+                                    if not _first_delta_emitted and _llm_dispatch_started_at is not None:
+                                        _first_delta_emitted = True
+                                        _now = time.perf_counter()
+                                        yield f'data: {json.dumps({"type": "stream_timing", "phase": "first_delta", "data": {"mode": "chat", "llm_wait_ms": round((_now - _llm_dispatch_started_at) * 1000.0, 2), "total_ms": round((_now - _stream_started_at) * 1000.0, 2)}})}\n\n'
                                     full_response += data["delta"]
                                     _stream_set(session, partial=full_response)
                                     yield chunk
@@ -785,6 +794,8 @@ def setup_chat_routes(
                 # ── Agent mode: full agent loop with tools ──
                 _agent_rounds = 0
                 _agent_tool_calls = 0
+                _llm_dispatch_started_at = time.perf_counter()
+                yield f'data: {json.dumps({"type": "stream_timing", "phase": "pre_llm", "data": {"mode": "agent", "ms": round((_llm_dispatch_started_at - _stream_started_at) * 1000.0, 2)}})}\n\n'
                 try:
                     from src.settings import get_setting
                     _tool_budget = int(get_setting("agent_max_tool_calls", 0))
@@ -809,6 +820,10 @@ def setup_chat_routes(
                             try:
                                 data = json.loads(chunk[6:])
                                 if "delta" in data:
+                                    if not _first_delta_emitted and _llm_dispatch_started_at is not None:
+                                        _first_delta_emitted = True
+                                        _now = time.perf_counter()
+                                        yield f'data: {json.dumps({"type": "stream_timing", "phase": "first_delta", "data": {"mode": "agent", "llm_wait_ms": round((_now - _llm_dispatch_started_at) * 1000.0, 2), "total_ms": round((_now - _stream_started_at) * 1000.0, 2)}})}\n\n'
                                     full_response += data["delta"]
                                     _stream_set(session, partial=full_response)
                                     yield chunk

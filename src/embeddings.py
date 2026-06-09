@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 _DEFAULT_MODEL = "all-minilm:l6-v2"
 _DEFAULT_FASTEMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
+from pathlib import Path
 
 class EmbeddingClient:
     """Drop-in replacement for SentenceTransformer.encode() using an HTTP API."""
@@ -112,10 +113,7 @@ class FastEmbedClient:
         kwargs = {"model_name": self.model, "cache_dir": cache_dir}
         self._embedding = TextEmbedding(**kwargs)
         self._dim: Optional[int] = None
-        self.url = "local://fastembed"
-        logger.info(f"FastEmbed loaded model={self.model}")
-
-    def get_sentence_embedding_dimension(self) -> int:
+        cache_dir = get_fastembed_cache_dir()
         if self._dim is not None:
             return self._dim
         vec = self.encode(["hello"])
@@ -161,6 +159,41 @@ def _load_persisted_endpoint() -> dict:
 
 
 _http_embed_down = False  # process-level latch: skip re-probing a dead endpoint
+
+
+def get_fastembed_cache_dir() -> str:
+    return os.getenv("FASTEMBED_CACHE_PATH") or os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "data", "fastembed_cache",
+    )
+
+
+def fastembed_model_cached() -> bool:
+    """Return True when a local FastEmbed model file is already present.
+
+    Startup should avoid instantiating FastEmbed when the cache is empty or
+    broken, because that path is relatively expensive and fails noisily.
+    """
+    cache_dir = Path(get_fastembed_cache_dir())
+    if not cache_dir.exists():
+        return False
+    try:
+        return any(cache_dir.rglob("model.onnx"))
+    except Exception:
+        return False
+
+
+def embedding_backend_likely_available() -> bool:
+    """Cheap hint for whether embedding init is worth attempting now.
+
+    We only consider an HTTP backend "likely" when the user explicitly
+    configured one (env or persisted settings). The default localhost Ollama
+    fallback is intentionally ignored here so app startup stays fast when the
+    embeddings route is absent.
+    """
+    persisted = _load_persisted_endpoint()
+    configured_url = (persisted.get("url") or os.getenv("EMBEDDING_URL") or "").strip()
+    return bool(configured_url) or fastembed_model_cached()
 
 
 def reset_http_embed_state():

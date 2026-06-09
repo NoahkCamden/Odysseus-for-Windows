@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, Form
 
 from services.youtube.youtube_handler import extract_youtube_id, extract_transcript_async
 from core.constants import DEFAULT_HOST
+from core.perf_metrics import get_perf_snapshot, reset_perf_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,15 @@ def setup_diagnostics_routes(
         if rag_available and rag_manager:
             return rag_manager.get_stats()
         return {"error": "RAG system not available"}
+
+    @router.get("/api/perf/stats")
+    async def get_perf_stats() -> Dict[str, Any]:
+        return get_perf_snapshot()
+
+    @router.post("/api/perf/reset")
+    async def reset_perf_stats() -> Dict[str, Any]:
+        reset_perf_snapshot()
+        return {"ok": True}
 
     @router.get("/api/test/youtube")
     async def test_youtube(url: str) -> Dict[str, Any]:

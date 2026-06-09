@@ -14,7 +14,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Optional
 
-from .database import Session as DbSession, ChatMessage as DbChatMessage, Document as DbDocument, SessionLocal
+from .database import Session as DbSession, ChatMessage as DbChatMessage, Document as DbDocument, SessionLocal, update_session_last_accessed
 from .models import Session, ChatMessage
 
 logger = logging.getLogger(__name__)
@@ -342,17 +342,10 @@ class SessionManager:
 
     def _touch_session(self, session_id: str):
         """Update last_accessed timestamp."""
-        db = SessionLocal()
         try:
-            db_session = db.query(DbSession).filter(DbSession.id == session_id).first()
-            if db_session:
-                db_session.last_accessed = datetime.now(timezone.utc)
-                db.commit()
+            update_session_last_accessed(session_id)
         except Exception as e:
             logger.error(f"Error updating last_accessed: {e}")
-            db.rollback()
-        finally:
-            db.close()
 
     def create_session(
         self,

@@ -21,7 +21,7 @@ from core.constants import (
     REQUEST_TIMEOUT, OPENAI_API_KEY,
 )
 from core.database import SessionLocal, ApiToken
-from core.middleware import SecurityHeadersMiddleware
+from core.middleware import SecurityHeadersMiddleware, RequestTimingMiddleware
 from core.auth import AuthManager
 from core.exceptions import (
     SessionNotFoundError, InvalidFileUploadError,
@@ -59,6 +59,7 @@ app.add_middleware(
 
 # ========= SECURITY HEADERS MIDDLEWARE =========
 app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(RequestTimingMiddleware)
 
 
 # ========= REQUEST TIMEOUT (FALLBACK FOR HUNG HANDLERS) =========
@@ -731,6 +732,10 @@ async def startup_event():
     # first turn as fast as subsequent ones (warm embed ≈ a few ms).
     async def _warmup_tool_index():
         try:
+            from src.embeddings import embedding_backend_likely_available
+            if not embedding_backend_likely_available():
+                logger.info("[startup] Tool index warmup skipped: no embedding backend configured")
+                return
             from src.tool_index import get_tool_index
             idx = await asyncio.to_thread(get_tool_index)
             if idx:
@@ -740,7 +745,52 @@ async def startup_event():
         except Exception as e:
             logger.warning(f"Tool index warmup failed (non-critical): {type(e).__name__}: {e}")
 
-    _startup_tasks.append(asyncio.create_task(_warmup_tool_index()))
+    if os.getenv("ODYSSEUS_PREWARM_TOOL_INDEX", "false").lower() in ("1", "true", "yes"):
+        _startup_tasks.append(asyncio.create_task(_warmup_tool_index()))
+
+    # Optional first-token prewarm for the default chat model. By default this
+    # only runs for local endpoints so we avoid burning remote paid tokens.
+    async def _warmup_default_chat_model():
+        try:
+            import httpx
+            from urllib.parse import urlparse
+            from src.endpoint_resolver import resolve_endpoint
+
+            chat_url, chat_model, chat_headers = resolve_endpoint("default")
+            if not chat_url or not chat_model:
+                logger.info("[startup] Chat prewarm skipped: no default endpoint/model")
+                return
+
+            host = (urlparse(chat_url).hostname or "").lower()
+            is_local = host in ("localhost", "127.0.0.1", "::1")
+            allow_remote = os.getenv("ODYSSEUS_PREWARM_REMOTE_CHAT", "false").lower() in ("1", "true", "yes")
+            if not is_local and not allow_remote:
+                logger.info("[startup] Chat prewarm skipped: remote endpoint (set ODYSSEUS_PREWARM_REMOTE_CHAT=true to enable)")
+                return
+
+            payload = {
+                "model": chat_model,
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1,
+                "temperature": 0,
+                "stream": False,
+            }
+            req_headers = {"Content-Type": "application/json"}
+            if isinstance(chat_headers, dict):
+                req_headers.update(chat_headers)
+
+            async with httpx.AsyncClient(timeout=45.0) as client:
+                resp = await client.post(chat_url, json=payload, headers=req_headers)
+                if resp.status_code < 400:
+                    logger.info("[startup] Default chat model pre-warmed")
+                else:
+                    logger.info("[startup] Default chat prewarm skipped: HTTP %s", resp.status_code)
+        except Exception as e:
+            logger.info("[startup] Default chat prewarm skipped: %s: %s", type(e).__name__, e)
+
+    if os.getenv("ODYSSEUS_PREWARM_CHAT", "true").lower() in ("1", "true", "yes"):
+        _startup_tasks.append(asyncio.create_task(_warmup_default_chat_model()))
+
     # Warmup: ping all known LLM endpoints to prime connections
     async def _warmup_endpoints():
         try:

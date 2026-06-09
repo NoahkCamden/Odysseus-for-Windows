@@ -3,10 +3,13 @@
 
 import os
 import secrets
+import time
 
 from fastapi import HTTPException, Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
+
+from core.perf_metrics import begin_request_metrics, finish_request_metrics
 
 
 # Per-process token that lets the in-app tool layer hit admin-gated
@@ -98,3 +101,23 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
                 "frame-ancestors 'none'"
             )
         return response
+
+
+class RequestTimingMiddleware(BaseHTTPMiddleware):
+    """Track per-request app and DB time for local diagnostics."""
+
+    async def dispatch(self, request: Request, call_next) -> Response:
+        token = begin_request_metrics(request.method, request.url.path or "")
+        started = time.perf_counter()
+        response = None
+        status_code = 500
+        try:
+            response = await call_next(request)
+            status_code = getattr(response, "status_code", 200)
+            return response
+        finally:
+            metrics = finish_request_metrics(token, status_code)
+            if response is not None and metrics is not None:
+                response.headers["X-Process-Time-Ms"] = str(round((time.perf_counter() - started) * 1000.0, 2))
+                response.headers["X-DB-Time-Ms"] = str(metrics["db_total_ms"])
+                response.headers["X-DB-Queries"] = str(metrics["db_count"])

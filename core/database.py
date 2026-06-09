@@ -1,10 +1,14 @@
 import os
 import logging
+import threading
+import time
 from datetime import datetime
-from sqlalchemy import create_engine, Column, String, Text, Boolean, DateTime, Integer, ForeignKey, JSON, Index, func, text
+from sqlalchemy import create_engine, Column, String, Text, Boolean, DateTime, Integer, ForeignKey, JSON, Index, func, text, event
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.ext.declarative import declarative_base, declared_attr
 from sqlalchemy.orm import relationship, sessionmaker, backref
+
+from core.perf_metrics import record_db_query
 
 logger = logging.getLogger(__name__)
 
@@ -23,15 +27,77 @@ class TimestampMixin:
 
 # Get database URL from environment, default to SQLite
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./data/app.db")
+IS_SQLITE = "sqlite" in DATABASE_URL.lower()
+SQLITE_BUSY_TIMEOUT_MS = int(float(os.getenv("SQLITE_BUSY_TIMEOUT_SECONDS", "5")) * 1000)
+SESSION_ACCESS_TOUCH_INTERVAL_SECONDS = max(
+    float(os.getenv("SESSION_ACCESS_TOUCH_INTERVAL_SECONDS", "30")),
+    0.0,
+)
+
+_session_access_lock = threading.Lock()
+_session_access_touched_at = {}
 
 # Create engine
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {}
+    connect_args=(
+        {
+            "check_same_thread": False,
+            "timeout": max(SQLITE_BUSY_TIMEOUT_MS / 1000.0, 1.0),
+        }
+        if IS_SQLITE else {}
+    )
 )
+
+
+@event.listens_for(engine, "before_cursor_execute")
+def _before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+    conn.info.setdefault("query_start_time", []).append(time.perf_counter())
+
+
+@event.listens_for(engine, "after_cursor_execute")
+def _after_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+    started = None
+    stack = conn.info.get("query_start_time")
+    if stack:
+        started = stack.pop()
+    if started is None:
+        return
+    record_db_query((time.perf_counter() - started) * 1000.0)
+
+if IS_SQLITE:
+    @event.listens_for(engine, "connect")
+    def _configure_sqlite_connection(dbapi_connection, _connection_record):
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute("PRAGMA foreign_keys=ON")
+        finally:
+            cursor.close()
 
 # Create session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+
+def _clear_session_access_touch(session_id: str) -> None:
+    with _session_access_lock:
+        _session_access_touched_at.pop(session_id, None)
+
+
+def _should_touch_session_access(session_id: str, min_interval_seconds: float = SESSION_ACCESS_TOUCH_INTERVAL_SECONDS) -> bool:
+    if not session_id:
+        return False
+    if min_interval_seconds <= 0:
+        return True
+    now = time.monotonic()
+    with _session_access_lock:
+        last_touched = _session_access_touched_at.get(session_id)
+        if last_touched is not None and (now - last_touched) < min_interval_seconds:
+            return False
+        _session_access_touched_at[session_id] = now
+        return True
 
 
 class EncryptedText(TypeDecorator):
@@ -619,6 +685,10 @@ class Memory(Base):
     # Timestamp as Unix timestamp
     timestamp = Column(Integer, default=lambda: int(datetime.utcnow().timestamp()))
 
+    # Retrieval metadata
+    pinned = Column(Boolean, default=False)
+    uses = Column(Integer, default=0)
+
     # Relationship to Session
     session = relationship("Session", backref="memories")
 
@@ -667,6 +737,26 @@ def _migrate_add_last_message_at_column():
         logging.getLogger(__name__).info("Migrated: added + backfilled 'last_message_at' on sessions")
     except Exception as e:
         logging.getLogger(__name__).warning(f"last_message_at migration failed: {e}")
+
+
+def _migrate_memory_metadata_columns():
+    """Add pinned/uses to memories for DB-backed memory retrieval state."""
+    import sqlite3
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.execute("PRAGMA table_info(memories)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if columns and "pinned" not in columns:
+            conn.execute("ALTER TABLE memories ADD COLUMN pinned BOOLEAN DEFAULT 0")
+        if columns and "uses" not in columns:
+            conn.execute("ALTER TABLE memories ADD COLUMN uses INTEGER DEFAULT 0")
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"memories metadata migration failed: {e}")
 
 def _migrate_add_document_archived_column():
     """Add `archived` to documents (soft-archive flag). Guarded + idempotent."""
@@ -1500,6 +1590,7 @@ def init_db():
     _migrate_add_owner_column()
     _migrate_add_document_archived_column()
     _migrate_add_last_message_at_column()
+    _migrate_memory_metadata_columns()
     _migrate_add_folder_column()
     _migrate_add_token_columns()
     _migrate_add_mode_column()
@@ -1747,12 +1838,15 @@ def get_detailed_stats():
 
 def update_session_last_accessed(session_id: str):
     """Update the last_accessed timestamp for a session"""
+    if not _should_touch_session_access(session_id):
+        return False
     with get_db_session() as db:
         db_session = db.query(Session).filter(Session.id == session_id).first()
-        if db_session:
-            db_session.last_accessed = datetime.utcnow()
-            db.commit()
-            return True
+        if not db_session:
+            _clear_session_access_touch(session_id)
+            return False
+        db_session.last_accessed = datetime.utcnow()
+        return True
     return False
 
 def get_session_by_id(session_id: str):

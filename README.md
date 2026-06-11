@@ -192,6 +192,12 @@ static/    index.html + app.js + style.css + js/ (modular front-end)
 docs/      landing page (index.html) + preview clips
 ```
 
+Latest performance increases --
+
+<img width="3821" height="1849" alt="image" src="https://github.com/user-attachments/assets/12e51cc9-3e81-4540-accb-d9cc80f97554" />
+
+
+
 ## Data
 All user data lives in `data/` (gitignored): `app.db` (sessions, messages, documents),
 `memory.json`, `presets.json`, `uploads/`, `personal_docs/`, `chroma/`, `settings.json`.

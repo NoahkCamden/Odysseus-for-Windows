@@ -5,6 +5,8 @@ import time
 import json
 import logging
 import hashlib
+import os
+from urllib.parse import urlparse
 from fastapi import HTTPException
 from typing import Optional, Dict, List
 
@@ -78,6 +80,20 @@ def _host_key(url: str) -> str:
     s = urlsplit(url)
     return f"{s.scheme}://{s.netloc}" if s.scheme and s.netloc else url
 
+
+def _is_local_target(url: str) -> bool:
+    """Return True when URL points at a local loopback host.
+
+    Local model servers (e.g. Ollama) can flap briefly during startup/reload;
+    bypassing dead-host cooldown for loopback avoids sticky 503s after a single
+    transient connect miss.
+    """
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    return host in {"localhost", "127.0.0.1", "::1"}
+
 def _is_host_dead(url: str) -> bool:
     key = _host_key(url)
     exp = _dead_hosts.get(key)
@@ -105,6 +121,22 @@ def _clear_host_dead(url: str) -> None:
     key = _host_key(url)
     _dead_hosts.pop(key, None)
     _host_fails.pop(key, None)
+
+
+def _first_token_timeout_seconds() -> float:
+    """Timeout budget for waiting on first streamed model output.
+
+    Keeps chat UX responsive when an upstream accepts the connection but does
+    not emit a first token for a long time.
+    """
+    raw = os.getenv("ODYSSEUS_FIRST_TOKEN_TIMEOUT", "45").strip()
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return 45.0
+    if value <= 0:
+        return 0.0
+    return value
 
 
 # Shared async HTTP client. Reusing one client keeps connections warm:
@@ -556,7 +588,7 @@ async def llm_call_async(
             tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
             payload[tok_key] = max_tokens
 
-    if _is_host_dead(target_url):
+    if _is_host_dead(target_url) and not _is_local_target(target_url):
         raise HTTPException(503, f"Upstream {_host_key(target_url)} marked unreachable (cooldown active)")
 
     call_timeout = httpx.Timeout(connect=3.0, read=float(timeout), write=10.0, pool=5.0)
@@ -655,8 +687,9 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
     # Short connect timeout: a reachable peer answers SYN in <100ms even on
     # Tailscale. 3s is plenty; 30s let one dead upstream wedge the UI.
     stream_timeout = httpx.Timeout(connect=3.0, read=float(timeout), write=30.0, pool=5.0)
+    first_token_timeout_s = _first_token_timeout_seconds()
 
-    if _is_host_dead(target_url):
+    if _is_host_dead(target_url) and not _is_local_target(target_url):
         yield f'event: error\ndata: {json.dumps({"error": f"Upstream {_host_key(target_url)} unreachable (cooldown active)", "status": 503})}\n\n'
         return
     note_model_activity(target_url, model)
@@ -678,7 +711,19 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                     friendly = _format_upstream_error(r.status_code, raw, target_url)
                     yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500]})}\n\n'
                     return
-                async for line in r.aiter_lines():
+                _first_payload_sent = False
+                _line_iter = r.aiter_lines()
+                while True:
+                    try:
+                        if first_token_timeout_s > 0 and not _first_payload_sent:
+                            line = await asyncio.wait_for(_line_iter.__anext__(), timeout=first_token_timeout_s)
+                        else:
+                            line = await _line_iter.__anext__()
+                    except StopAsyncIteration:
+                        break
+                    except asyncio.TimeoutError:
+                        yield f'event: error\ndata: {json.dumps({"error": f"First token timeout ({first_token_timeout_s:.0f}s)", "status": 504})}\n\n'
+                        return
                     if not line or not line.startswith("data: "):
                         continue
                     data = line[6:].strip()
@@ -703,6 +748,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                             if delta_type == "text_delta":
                                 text = delta.get("text", "")
                                 if text:
+                                    _first_payload_sent = True
                                     yield f'data: {json.dumps({"delta": text})}\n\n'
                             elif delta_type == "input_json_delta":
                                 # Accumulate tool arguments JSON
@@ -712,6 +758,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                                     _anth_tool_blocks[idx]["arguments"] += partial
                                     # Stream tool arg deltas for doc tools
                                     if partial and _anth_tool_blocks[idx].get("name") in ("create_document", "update_document", "edit_document"):
+                                        _first_payload_sent = True
                                         yield f'data: {json.dumps({"type": "tool_call_delta", "index": idx, "name": _anth_tool_blocks[idx]["name"], "arg_delta": partial})}\n\n'
                         elif evt == "message_start":
                             _anth_input_tokens = j.get("message", {}).get("usage", {}).get("input_tokens", 0)
@@ -728,6 +775,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                                         "name": tb["name"],
                                         "arguments": tb["arguments"],
                                     })
+                                _first_payload_sent = True
                                 yield f'data: {json.dumps({"type": "tool_calls", "calls": calls})}\n\n'
                             if _anth_input_tokens or _anth_output_tokens:
                                 yield f'data: {json.dumps({"type": "usage", "data": {"input_tokens": _anth_input_tokens, "output_tokens": _anth_output_tokens}})}\n\n'
@@ -779,7 +827,20 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                 yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500]})}\n\n'
                 return
 
-            async for line in r.aiter_lines():
+            _first_payload_sent = False
+            _line_iter = r.aiter_lines()
+            while True:
+                try:
+                    if first_token_timeout_s > 0 and not _first_payload_sent:
+                        line = await asyncio.wait_for(_line_iter.__anext__(), timeout=first_token_timeout_s)
+                    else:
+                        line = await _line_iter.__anext__()
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError:
+                    yield f'event: error\ndata: {json.dumps({"error": f"First token timeout ({first_token_timeout_s:.0f}s)", "status": 504})}\n\n'
+                    return
+
                 if not line:
                     continue
 
@@ -809,6 +870,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                                         # Reasoning tokens (VLLM --reasoning-parser, e.g. Qwen3/DeepSeek-R1)
                                         reasoning = delta.get("reasoning_content", "")
                                         if reasoning:
+                                            _first_payload_sent = True
                                             yield f'data: {json.dumps({"delta": reasoning, "thinking": True})}\n\n'
                                         content = delta.get("content", "")
                                         if content:
@@ -819,6 +881,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                                             if _thinking_model and not _first_content_sent and content.lstrip().lower().startswith("</think"):
                                                 content = "<think>" + content
                                             _first_content_sent = True
+                                            _first_payload_sent = True
                                             yield f'data: {json.dumps({"delta": content})}\n\n'
                                         # Native tool calls — accumulate across chunks
                                         for tc in delta.get("tool_calls", []):
@@ -834,12 +897,15 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                                                 _tc_acc[idx]["arguments"] += func["arguments"]
                                                 # Stream tool arg deltas for doc tools
                                                 if func["arguments"] and _tc_acc[idx].get("name") in ("create_document", "update_document", "edit_document"):
+                                                    _first_payload_sent = True
                                                     yield f'data: {json.dumps({"type": "tool_call_delta", "index": idx, "name": _tc_acc[idx]["name"], "arg_delta": func["arguments"]})}\n\n'
                                 elif "text" in j:
                                     if j["text"]:
+                                        _first_payload_sent = True
                                         yield f'data: {json.dumps({"delta": j["text"]})}\n\n'
                             else:
                                 if data.strip():
+                                    _first_payload_sent = True
                                     yield f'data: {json.dumps({"delta": data})}\n\n'
                     except Exception as e:
                         logger.error(f"Error parsing stream data: {e}")

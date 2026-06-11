@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import shutil
 import signal
 import subprocess
 import time
@@ -82,29 +84,70 @@ def launch(command: str, session_id: str, cwd: Optional[str] = None,
     log_path = _JOBS_DIR / f"{job_id}.log"
     exit_path = _JOBS_DIR / f"{job_id}.exit"
 
-    # The user command goes in its OWN script file, run as a child `bash`. This
-    # is what isolates it: an `exit` inside it only ends that child (so the
-    # wrapper still records the exit code), and — unlike textually wrapping the
-    # command in `( … )` — the wrapper can't be broken by an unbalanced paren or
-    # a trailing line-continuation in the command. `$?` is the child's real
-    # exit status.
-    cmd_path = _JOBS_DIR / f"{job_id}.cmd.sh"
-    cmd_path.write_text(command + "\n")
-    wrapper = (
-        f"bash {cmd_path} > {log_path} 2>&1\n"
-        f"echo $? > {exit_path}\n"
-    )
-    script_path = _JOBS_DIR / f"{job_id}.sh"
-    script_path.write_text(wrapper)
+    run_cwd = cwd or os.getcwd()
+    bash_exe = shutil.which("bash")
 
-    proc = subprocess.Popen(
-        ["bash", str(script_path)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        stdin=subprocess.DEVNULL,
-        cwd=cwd or None,
-        start_new_session=True,  # setsid — detach from the request lifecycle
-    )
+    if bash_exe:
+        # Keep bash semantics when available, but quote POSIX paths explicitly
+        # so Windows backslashes never break command/script resolution.
+        cmd_path = _JOBS_DIR / f"{job_id}.cmd.sh"
+        script_path = _JOBS_DIR / f"{job_id}.sh"
+        cmd_path.write_text(command + "\n", encoding="utf-8")
+
+        cmd_q = shlex.quote(cmd_path.resolve().as_posix())
+        log_q = shlex.quote(log_path.resolve().as_posix())
+        exit_q = shlex.quote(exit_path.resolve().as_posix())
+        script_path.write_text(
+            f"bash {cmd_q} > {log_q} 2>&1\n"
+            f"printf '%s\\n' \"$?\" > {exit_q}\n",
+            encoding="utf-8",
+        )
+
+        proc = subprocess.Popen(
+            [bash_exe, str(script_path.resolve())],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            cwd=run_cwd,
+            start_new_session=True,  # setsid — detach from the request lifecycle
+        )
+    else:
+        # Windows/no-bash fallback: run via PowerShell so command separators
+        # and quoting behave predictably (cmd.exe parsing is too limited here).
+        cmd_path = _JOBS_DIR / f"{job_id}.cmd.ps1"
+        script_path = _JOBS_DIR / f"{job_id}.runner.ps1"
+        cmd_path.write_text(command + "\n", encoding="utf-8")
+        script_path.write_text(
+            f"& \"{cmd_path.resolve()}\" 2>&1 | Out-File -FilePath \"{log_path.resolve()}\" -Encoding utf8\n"
+            "if ($LASTEXITCODE -ne $null) {\n"
+            "  $ODYSSEUS_EC = [int]$LASTEXITCODE\n"
+            "} elseif ($?) {\n"
+            "  $ODYSSEUS_EC = 0\n"
+            "} else {\n"
+            "  $ODYSSEUS_EC = 1\n"
+            "}\n"
+            f"Set-Content -Path \"{exit_path.resolve()}\" -Value $ODYSSEUS_EC\n"
+            "exit $ODYSSEUS_EC\n",
+            encoding="utf-8",
+        )
+
+        proc = subprocess.Popen(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(script_path.resolve()),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            cwd=run_cwd,
+            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+            start_new_session=True,
+        )
 
     rec = {
         "id": job_id,
@@ -128,9 +171,11 @@ def launch(command: str, session_id: str, cwd: Optional[str] = None,
 
 def _read_output(rec: Dict[str, Any]) -> str:
     try:
-        txt = Path(rec["log_path"]).read_text(errors="replace")
+        txt = Path(rec["log_path"]).read_text(encoding="utf-8", errors="replace")
     except Exception:
         return ""
+    if txt.startswith("\ufeff") or txt.startswith("\ufffe"):
+        txt = txt[1:]
     if len(txt) > _MAX_OUTPUT_CHARS:
         # Keep head + tail — the interesting bits are usually at both ends.
         head = txt[: _MAX_OUTPUT_CHARS // 2]

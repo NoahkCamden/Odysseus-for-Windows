@@ -4,6 +4,10 @@
 # Note: chromadb-client + fastembed moved to requirements.txt — RAG, semantic
 # memory, and tool selection are core paths, so they ship by default now.
 
+# NLTK utilities for tokenization/corpus workflows used in custom prompts or
+# ad-hoc python/bash tool scripts.
+nltk
+
 # DuckDuckGo as a search provider option.
 # Install if you want DDG in the search-provider dropdown.
 # Alternatives: SearXNG, Brave, Tavily, Serper, Google PSE.

@@ -12,6 +12,8 @@ import collections
 import json
 import logging
 import os
+import shutil
+import sys
 import time
 from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
@@ -323,12 +325,35 @@ async def _direct_fallback(
 
     try:
         if tool == "bash":
-            proc = await asyncio.create_subprocess_shell(
-                content,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=_subproc_env,
-            )
+            bash_exe = shutil.which("bash")
+            if bash_exe:
+                # The tool is named `bash`; prefer real bash semantics when available.
+                proc = await asyncio.create_subprocess_exec(
+                    bash_exe, "-lc", content,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=_subproc_env,
+                )
+            elif os.name == "nt":
+                proc = await asyncio.create_subprocess_exec(
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    content,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=_subproc_env,
+                )
+            else:
+                proc = await asyncio.create_subprocess_shell(
+                    content,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=_subproc_env,
+                )
             stdout, stderr, rc, timed_out = await _run_subprocess_streaming(
                 proc,
                 timeout=DEFAULT_BASH_TIMEOUT,
@@ -347,8 +372,11 @@ async def _direct_fallback(
             # Run user code in a subprocess so an infinite loop or crash
             # can't take the whole server down. -I = isolated mode (skip
             # user site, no PYTHONPATH inheritance) for hygiene.
+            py_exe = sys.executable or shutil.which("python") or shutil.which("python3")
+            if not py_exe:
+                return {"error": "python: no interpreter found in environment", "exit_code": 127}
             proc = await asyncio.create_subprocess_exec(
-                "python3", "-I", "-c", content,
+                py_exe, "-I", "-c", content,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=_subproc_env,

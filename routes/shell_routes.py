@@ -511,6 +511,7 @@ def setup_shell_routes() -> APIRouter:
             {"name": "realesrgan", "pip": "realesrgan", "desc": "AI denoise + upscale (Real-ESRGAN). Used by editor's Denoise and Upscale tools.", "category": "Image", "target": "local"},
             # ── Tools ──
             {"name": "playwright", "pip": "playwright", "desc": "Browser automation for web tools", "category": "Tools", "target": "local"},
+            {"name": "nltk", "pip": "nltk", "desc": "Natural language toolkit for tokenizers and corpora-based text utilities", "category": "Tools", "target": "local"},
         ]
         # Remote check: for remote-target packages, probe the selected server's
         # venv over SSH so a remote `pip install` actually reflects here.
@@ -607,7 +608,7 @@ def setup_shell_routes() -> APIRouter:
         known = {
             "rembg[gpu]", "hf_transfer", "llama-cpp-python[server]", "sglang[all]", "diffusers",
             "TTS", "bark", "faster-whisper", "playwright", "realesrgan", "gfpgan",
-            "insightface", "onnxruntime-gpu", "onnxruntime", "hdbscan",
+            "insightface", "onnxruntime-gpu", "onnxruntime", "hdbscan", "nltk",
         }
         if pip_name not in known:
             return {"ok": False, "error": f"Unknown package: {pip_name}"}

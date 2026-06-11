@@ -1,6 +1,12 @@
 {
+  "scripts": {
+    "desktop:backend": "node scripts/desktop-backend.js",
+    "desktop:dev": "tauri dev",
+    "desktop:build": "tauri build"
+  },
   "devDependencies": {
-    "@antithesishq/bombadil": "^0.3.2"
+    "@antithesishq/bombadil": "^0.3.2",
+    "@tauri-apps/cli": "^2.0.0"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.98.0"

@@ -122,6 +122,29 @@ uvicorn app:app --host 0.0.0.0 --port 7000
 Open `http://localhost:7000`, log in with the generated admin password,
 and configure everything else inside **Settings**.
 
+### Option 4: Desktop dev shell (Windows/macOS/Linux)
+This runs Odysseus in a native desktop window via Tauri while still using
+your local Python environment for the backend.
+
+Requirements:
+- Python 3.11+
+- Node.js 18+
+- Rust toolchain (`cargo`, `rustc`)
+
+From the project root:
+```bash
+pip install -r requirements.txt
+npm install
+npm run desktop:dev
+```
+
+`desktop:dev` opens a native desktop window and the app runtime starts the
+backend on `127.0.0.1:7000` automatically.
+
+Optional overrides:
+- `ODYSSEUS_APP_DIR` -> absolute path containing `app.py` (defaults to current dir)
+- `ODYSSEUS_PYTHON` -> python executable to use (for example your venv interpreter)
+
 ## Security Notes
 Odysseus is a self-hosted workspace with powerful local tools: shell access, file uploads, model downloads, web research, email/calendar integrations, and API tokens. Treat it like an admin console.
 

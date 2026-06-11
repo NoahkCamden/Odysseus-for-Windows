@@ -1,0 +1,38 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Odysseus",
+  "version": "1.0.0",
+  "identifier": "com.odysseus.desktop",
+  "build": {
+    "beforeDevCommand": "npm run desktop:backend",
+    "devUrl": "http://127.0.0.1:7000",
+    "frontendDist": "../static"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "url": "http://127.0.0.1:7000",
+        "title": "Odysseus",
+        "width": 1440,
+        "height": 920,
+        "resizable": true,
+        "visible": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico",
+      "icons/icon.icns"
+    ]
+  }
+}

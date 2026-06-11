@@ -35,16 +35,83 @@ A full, hover-to-play tour lives on the landing page (`docs/index.html`). A few 
 ### Notes & Tasks
 ![Notes & Tasks](docs/notes.gif)
 
+## Desktop App Tutorial
+The app version of Odysseus is the native desktop shell built with Tauri. It runs the backend locally, then opens a desktop window on top of `127.0.0.1:7000`, so you get the same workspace without managing a browser tab.
+
+**Windows quick path:** download the latest release asset labeled for Windows from the [GitHub Releases page](https://github.com/pewdiepie-archdaemon/odysseus/releases), then either run the installer or unzip the portable build if that is the format provided.
+
+### 1. Download the app version
+If the project has published a release for your platform, download the latest desktop build from the repository's [GitHub Releases page](https://github.com/pewdiepie-archdaemon/odysseus/releases). Use the Windows asset if you are on Windows.
+
+If the release comes as an installer, run it. If it comes as a zipped or portable build, extract it first, then launch the app from the unpacked folder.
+
+If there is no release for your platform yet, build the desktop app locally instead:
+```bash
+git clone <your-odysseus-repo-url>
+cd odysseus
+pip install -r requirements.txt
+npm install
+npm run desktop:build
+```
+
+### 2. Install or launch it
+Use the downloaded installer/app package for your operating system, or open the locally built desktop bundle.
+
+The desktop app always starts the Odysseus backend for you. On first launch it may take a moment while Python starts and the local UI becomes available.
+
+### 3. First run setup
+When the app opens:
+1. Wait for the window to finish loading.
+2. Sign in or complete the first-time setup flow if Odysseus asks for it.
+3. Open **Settings** and connect the providers you want to use, such as your LLM server, search provider, email account, or model endpoints.
+4. Keep the defaults if you only want to test the local app first. You can add integrations later.
+
+If you want to use a custom Python interpreter for the backend, set `ODYSSEUS_PYTHON` before launching the app.
+
+### 4. Use the app day to day
+Once the window is open, you can use the app just like the web version:
+- Chat with local models or API providers.
+- Use **Cookbook** to inspect hardware and download models.
+- Open **Documents** for editing and AI-assisted writing.
+- Try **Deep Research**, **Compare**, **Memory**, **Email**, **Notes**, and **Calendar** from the sidebar.
+
+Your local data stays in the `data/` folder next to the project or app workspace, depending on how you launch it. Keep that folder private if you store personal documents, tokens, or synced mail there.
+
+### 5. Update the app
+To update a downloaded build, close the app, install the newer release over the old one, and launch it again.
+
+If you built from source, pull the latest changes and rebuild:
+```bash
+git pull
+npm run desktop:build
+```
+
+### 6. If the app does not start
+Use these quick checks:
+- Make sure Python 3.11+ is installed and reachable.
+- Make sure Node.js 18+ and the Rust toolchain are installed if you are building locally.
+- If the app window opens but the backend fails, run `npm run desktop:backend` from the project root to see the backend logs directly.
+- If Odysseus cannot find Python, set `ODYSSEUS_PYTHON` to the exact interpreter you want it to use.
+
 ## Quick Start
 
-Defaults work out of the box — clone, run, configure inside the app.
-Open the **Settings** panel after first login to point Odysseus at your LLM
-server, search provider, email account, etc. Only touch `.env` if you need
-to override deployment-level things like `AUTH_ENABLED`, `DATABASE_URL`,
-or pre-seed `ODYSSEUS_ADMIN_PASSWORD` (otherwise an initial password is
-generated and printed on first boot).
+The fastest way to use Odysseus is the desktop app. Download the latest build from the [GitHub Releases page](https://github.com/pewdiepie-archdaemon/odysseus/releases), install it, launch it, and then configure providers inside the app.
 
-### Option 1: Docker (recommended)
+If you want to run from source or host the backend yourself, use the setup paths below.
+
+### Option 1: Desktop app
+This is the primary way to use Odysseus if you want the native app experience.
+
+1. Download the latest release from the [GitHub Releases page](https://github.com/pewdiepie-archdaemon/odysseus/releases).
+2. If you are on Windows, pick the Windows asset.
+3. Run the installer, or unzip the portable build if that is the format provided.
+4. Launch Odysseus.
+5. Wait for the local backend to start, then finish first-run setup inside **Settings**.
+6. Add your LLM server, search provider, email account, or other integrations.
+
+If you are building from source instead of using a release, follow the desktop tutorial above or the desktop dev shell instructions below.
+
+### Option 2: Docker (recommended)
 ```bash
 git clone <your-odysseus-repo-url>
 cd odysseus
@@ -81,7 +148,7 @@ MemoryVectorStore initialized
 The Cookbook model catalog check should print a non-zero count. If it prints
 `0`, rebuild the Odysseus image with `docker compose build --no-cache odysseus`.
 
-### Option 2: Manual install — Linux / macOS
+### Option 3: Manual install — Linux / macOS
 **Requirements:** Python 3.11+. On Linux/Termux, Cookbook also requires `tmux`
 for background model downloads and serves.
 
@@ -108,7 +175,7 @@ python setup.py            # creates data dirs and prints an initial admin passw
 uvicorn app:app --host 0.0.0.0 --port 7000
 ```
 
-### Option 3: Manual install — Windows (PowerShell)
+### Option 4: Manual install — Windows (PowerShell)
 ```powershell
 git clone <your-odysseus-repo-url>
 cd odysseus
@@ -122,9 +189,8 @@ uvicorn app:app --host 0.0.0.0 --port 7000
 Open `http://localhost:7000`, log in with the generated admin password,
 and configure everything else inside **Settings**.
 
-### Option 4: Desktop dev shell (Windows/macOS/Linux)
-This runs Odysseus in a native desktop window via Tauri while still using
-your local Python environment for the backend.
+### Option 5: Desktop dev shell (Windows/macOS/Linux)
+Use this if you want to work on the desktop app itself instead of downloading a release.
 
 Requirements:
 - Python 3.11+
@@ -138,8 +204,7 @@ npm install
 npm run desktop:dev
 ```
 
-`desktop:dev` opens a native desktop window and the app runtime starts the
-backend on `127.0.0.1:7000` automatically.
+`desktop:dev` opens a native desktop window and starts the backend on `127.0.0.1:7000` automatically.
 
 Optional overrides:
 - `ODYSSEUS_APP_DIR` -> absolute path containing `app.py` (defaults to current dir)

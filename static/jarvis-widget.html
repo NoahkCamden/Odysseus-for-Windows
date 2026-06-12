@@ -1,0 +1,778 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Jarvis</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:          #040810;
+      --bg-surface:  rgba(8, 16, 32, 0.97);
+      --accent:      #00d4ff;
+      --accent2:     #0070ff;
+      --border:      rgba(0, 212, 255, 0.18);
+      --border-hi:   rgba(0, 212, 255, 0.45);
+      --text:        #c8e8ff;
+      --text-dim:    rgba(200, 232, 255, 0.45);
+      --user-bg:     rgba(0, 100, 255, 0.12);
+      --user-border: rgba(0, 128, 255, 0.35);
+      --asst-bg:     rgba(0, 212, 255, 0.05);
+      --asst-border: rgba(0, 212, 255, 0.18);
+      --err:         #ff4455;
+      --radius:      14px;
+      --font:        'Segoe UI', system-ui, -apple-system, sans-serif;
+    }
+
+    html, body {
+      width: 100%; height: 100%;
+      background: transparent;
+      overflow: hidden;
+      font-family: var(--font);
+      font-size: 13px;
+      color: var(--text);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── Shell ─────────────────────────────────────────────── */
+    #shell {
+      display: flex;
+      flex-direction: column;
+      width: 100%; height: 100%;
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      box-shadow:
+        0 0 0 1px rgba(0, 212, 255, 0.08),
+        0 8px 40px rgba(0, 0, 0, 0.7),
+        0 0 80px rgba(0, 120, 255, 0.08) inset;
+    }
+
+    /* Subtle top-edge glow line */
+    #shell::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 10%; right: 10%;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, var(--accent), transparent);
+      opacity: 0.6;
+      border-radius: 1px;
+      pointer-events: none;
+      z-index: 1;
+    }
+
+    /* ── Title bar / drag region ───────────────────────────── */
+    #titlebar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 12px;
+      height: 38px;
+      flex-shrink: 0;
+      cursor: default;
+      user-select: none;
+      border-bottom: 1px solid var(--border);
+      background: rgba(0, 20, 50, 0.5);
+    }
+    /* Tauri drag region — entire titlebar is draggable */
+    #titlebar[data-tauri-drag-region] {
+      cursor: move;
+    }
+
+    /* Status orb */
+    #orb {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 6px var(--accent);
+      flex-shrink: 0;
+      transition: background 0.3s, box-shadow 0.3s;
+    }
+    #orb.idle       { background: rgba(0,212,255,0.4); box-shadow: none; }
+    #orb.streaming  { animation: pulse-cyan 0.8s ease-in-out infinite; }
+    #orb.listening  { background: #00ff88; box-shadow: 0 0 8px #00ff88; animation: pulse-green 0.5s ease-in-out infinite; }
+    #orb.thinking   { animation: spin-glow 1.2s linear infinite; }
+    #orb.error      { background: var(--err); box-shadow: 0 0 6px var(--err); }
+
+    @keyframes pulse-cyan {
+      0%, 100% { box-shadow: 0 0 4px var(--accent); opacity: 1; }
+      50%       { box-shadow: 0 0 14px var(--accent), 0 0 24px rgba(0,212,255,0.3); opacity: 0.7; }
+    }
+    @keyframes pulse-green {
+      0%, 100% { box-shadow: 0 0 4px #00ff88; }
+      50%       { box-shadow: 0 0 14px #00ff88, 0 0 24px rgba(0,255,136,0.3); }
+    }
+    @keyframes spin-glow {
+      0%   { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+      50%  { background: var(--accent2); box-shadow: 0 0 8px var(--accent2); }
+      100% { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+    }
+
+    #title-text {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 3px;
+      color: var(--accent);
+      text-transform: uppercase;
+      flex: 1;
+    }
+
+    #model-badge {
+      font-size: 10px;
+      color: var(--text-dim);
+      letter-spacing: 0.5px;
+      max-width: 120px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .tb-btn {
+      background: none;
+      border: none;
+      color: var(--text-dim);
+      cursor: pointer;
+      padding: 4px 6px;
+      border-radius: 4px;
+      font-size: 13px;
+      line-height: 1;
+      transition: color 0.2s, background 0.2s;
+    }
+    .tb-btn:hover { color: var(--text); background: rgba(0,212,255,0.08); }
+
+    /* ── Screens ───────────────────────────────────────────── */
+    .screen { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+    .screen.hidden { display: none !important; }
+
+    /* ── Login screen ──────────────────────────────────────── */
+    #login-screen {
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      padding: 24px 20px;
+    }
+
+    .login-logo {
+      font-size: 32px;
+      font-weight: 900;
+      letter-spacing: 4px;
+      color: var(--accent);
+      text-shadow: 0 0 20px rgba(0,212,255,0.5);
+      margin-bottom: 4px;
+    }
+    .login-sub {
+      font-size: 10px;
+      letter-spacing: 2px;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      margin-bottom: 12px;
+    }
+
+    .field {
+      width: 100%;
+      padding: 8px 12px;
+      background: rgba(0,212,255,0.04);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 13px;
+      outline: none;
+      transition: border 0.2s;
+    }
+    .field:focus { border-color: var(--accent); }
+    .field::placeholder { color: var(--text-dim); }
+
+    #login-btn {
+      width: 100%;
+      padding: 9px;
+      background: linear-gradient(135deg, rgba(0,100,255,0.3), rgba(0,212,255,0.2));
+      border: 1px solid var(--accent);
+      border-radius: 8px;
+      color: var(--accent);
+      font-family: var(--font);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: background 0.2s, box-shadow 0.2s;
+      margin-top: 4px;
+    }
+    #login-btn:hover {
+      background: linear-gradient(135deg, rgba(0,100,255,0.5), rgba(0,212,255,0.35));
+      box-shadow: 0 0 16px rgba(0,212,255,0.25);
+    }
+    #login-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    #login-error {
+      font-size: 11px;
+      color: var(--err);
+      text-align: center;
+      min-height: 16px;
+    }
+
+    /* ── Chat screen ───────────────────────────────────────── */
+    #chat-screen { overflow: hidden; }
+
+    /* Conversation */
+    #conversation {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      scroll-behavior: smooth;
+    }
+    #conversation::-webkit-scrollbar { width: 4px; }
+    #conversation::-webkit-scrollbar-track { background: transparent; }
+    #conversation::-webkit-scrollbar-thumb { background: rgba(0,212,255,0.2); border-radius: 2px; }
+
+    .msg {
+      max-width: 90%;
+      padding: 8px 11px;
+      border-radius: 10px;
+      line-height: 1.5;
+      font-size: 13px;
+      word-break: break-word;
+      white-space: pre-wrap;
+      animation: fadein 0.2s ease;
+    }
+    @keyframes fadein { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+    .msg.user {
+      align-self: flex-end;
+      background: var(--user-bg);
+      border: 1px solid var(--user-border);
+      color: var(--text);
+    }
+    .msg.assistant {
+      align-self: flex-start;
+      background: var(--asst-bg);
+      border: 1px solid var(--asst-border);
+      color: var(--text);
+    }
+    .msg.system {
+      align-self: center;
+      font-size: 11px;
+      color: var(--text-dim);
+      background: none;
+      border: none;
+      padding: 2px 0;
+    }
+
+    /* Streaming cursor */
+    .cursor {
+      display: inline-block;
+      width: 2px; height: 13px;
+      background: var(--accent);
+      margin-left: 2px;
+      vertical-align: text-bottom;
+      animation: blink 0.8s step-end infinite;
+    }
+    @keyframes blink { 50% { opacity: 0; } }
+
+    /* ── Input area ────────────────────────────────────────── */
+    #input-area {
+      flex-shrink: 0;
+      padding: 8px 10px 10px;
+      border-top: 1px solid var(--border);
+      background: rgba(0, 10, 25, 0.4);
+    }
+
+    #input-row {
+      display: flex;
+      align-items: flex-end;
+      gap: 6px;
+    }
+
+    #chat-input {
+      flex: 1;
+      resize: none;
+      background: rgba(0,212,255,0.04);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 13px;
+      line-height: 1.4;
+      padding: 7px 10px;
+      outline: none;
+      max-height: 100px;
+      overflow-y: auto;
+      transition: border 0.2s;
+    }
+    #chat-input:focus { border-color: rgba(0,212,255,0.4); }
+    #chat-input::placeholder { color: var(--text-dim); }
+    #chat-input::-webkit-scrollbar { width: 3px; }
+    #chat-input::-webkit-scrollbar-thumb { background: rgba(0,212,255,0.2); }
+
+    .icon-action {
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text-dim);
+      cursor: pointer;
+      padding: 7px 9px;
+      font-size: 15px;
+      line-height: 1;
+      transition: all 0.2s;
+      flex-shrink: 0;
+    }
+    .icon-action:hover { color: var(--accent); border-color: var(--accent); background: rgba(0,212,255,0.07); }
+    .icon-action:disabled { opacity: 0.35; cursor: not-allowed; }
+
+    #mic-btn.recording {
+      color: #00ff88;
+      border-color: #00ff88;
+      background: rgba(0,255,136,0.08);
+      animation: pulse-green 0.6s ease-in-out infinite;
+    }
+    #send-btn { color: var(--accent); border-color: rgba(0,212,255,0.35); }
+    #send-btn:hover:not(:disabled) { background: rgba(0,212,255,0.12); }
+
+    #status-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 5px;
+      min-height: 16px;
+    }
+
+    #status-text {
+      font-size: 10px;
+      color: var(--text-dim);
+      letter-spacing: 0.5px;
+    }
+
+    #stop-btn {
+      font-size: 10px;
+      padding: 2px 8px;
+      background: rgba(255,68,85,0.12);
+      border: 1px solid rgba(255,68,85,0.4);
+      border-radius: 5px;
+      color: var(--err);
+      cursor: pointer;
+      letter-spacing: 0.5px;
+      transition: background 0.2s;
+    }
+    #stop-btn:hover { background: rgba(255,68,85,0.22); }
+    #stop-btn.hidden { display: none; }
+  </style>
+</head>
+<body>
+<div id="shell">
+
+  <!-- Title bar (drag region) -->
+  <div id="titlebar" data-tauri-drag-region>
+    <div id="orb" class="idle"></div>
+    <span id="title-text">JARVIS</span>
+    <span id="model-badge"></span>
+    <button class="tb-btn" id="hide-btn" title="Hide (Ctrl+Alt+Space)">—</button>
+  </div>
+
+  <!-- Login screen -->
+  <div id="login-screen" class="screen">
+    <div class="login-logo">J</div>
+    <div class="login-sub">Stark Industries AI</div>
+    <input class="field" type="text"     id="username" placeholder="Username" autocomplete="username" />
+    <input class="field" type="password" id="password" placeholder="Password" autocomplete="current-password" />
+    <button id="login-btn">Connect</button>
+    <div id="login-error"></div>
+  </div>
+
+  <!-- Chat screen -->
+  <div id="chat-screen" class="screen hidden">
+    <div id="conversation"></div>
+
+    <div id="input-area">
+      <div id="input-row">
+        <textarea id="chat-input" placeholder="Ask Jarvis…" rows="1"></textarea>
+        <button class="icon-action" id="mic-btn"  title="Hold to talk">🎤</button>
+        <button class="icon-action" id="send-btn" title="Send (Enter)">▶</button>
+      </div>
+      <div id="status-row">
+        <span id="status-text">Initializing…</span>
+        <button id="stop-btn" class="hidden">■ Stop</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+'use strict';
+
+// ── State ───────────────────────────────────────────────────────────────
+const BASE = '';      // same origin — served via FastAPI at 127.0.0.1:7000
+let sessionId    = null;
+let activeReader = null;   // ReadableStreamDefaultReader during streaming
+let mediaRec     = null;   // MediaRecorder during PTT
+let audioChunks  = [];
+
+// ── DOM refs ────────────────────────────────────────────────────────────
+const orb        = document.getElementById('orb');
+const modelBadge = document.getElementById('model-badge');
+const loginScr   = document.getElementById('login-screen');
+const chatScr    = document.getElementById('chat-screen');
+const usernameEl = document.getElementById('username');
+const passwordEl = document.getElementById('password');
+const loginBtn   = document.getElementById('login-btn');
+const loginErr   = document.getElementById('login-error');
+const conv       = document.getElementById('conversation');
+const inputEl    = document.getElementById('chat-input');
+const micBtn     = document.getElementById('mic-btn');
+const sendBtn    = document.getElementById('send-btn');
+const statusTxt  = document.getElementById('status-text');
+const stopBtn    = document.getElementById('stop-btn');
+const hideBtn    = document.getElementById('hide-btn');
+
+// ── Helpers ─────────────────────────────────────────────────────────────
+function setOrb(state) {
+  orb.className = state;
+}
+
+function setStatus(text) {
+  statusTxt.textContent = text;
+}
+
+function showLogin() {
+  loginScr.classList.remove('hidden');
+  chatScr.classList.add('hidden');
+  setOrb('idle');
+  setStatus('');
+  loginErr.textContent = '';
+  usernameEl.focus();
+}
+
+function showChat() {
+  loginScr.classList.add('hidden');
+  chatScr.classList.remove('hidden');
+  setOrb('idle');
+  setStatus('Ready');
+  inputEl.focus();
+}
+
+function addMessage(role, text) {
+  const div = document.createElement('div');
+  div.className = `msg ${role}`;
+  div.textContent = text;
+  conv.appendChild(div);
+  conv.scrollTop = conv.scrollHeight;
+  return div;
+}
+
+function addSystem(text) {
+  const div = document.createElement('div');
+  div.className = 'msg system';
+  div.textContent = text;
+  conv.appendChild(div);
+  conv.scrollTop = conv.scrollHeight;
+  return div;
+}
+
+// Auto-grow textarea
+function autoGrow() {
+  inputEl.style.height = 'auto';
+  inputEl.style.height = Math.min(inputEl.scrollHeight, 100) + 'px';
+}
+inputEl.addEventListener('input', autoGrow);
+
+// ── Auth ─────────────────────────────────────────────────────────────────
+async function checkAuth() {
+  try {
+    const r = await fetch(`${BASE}/api/auth/status`, { credentials: 'include' });
+    if (r.ok) {
+      const d = await r.json();
+      return d.authenticated === true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+async function doLogin() {
+  loginBtn.disabled = true;
+  loginErr.textContent = '';
+  try {
+    const r = await fetch(`${BASE}/api/auth/login`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username: usernameEl.value.trim(),
+        password: passwordEl.value,
+        remember: true,
+      }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (r.ok && d.success !== false) {
+      await initSession();
+    } else {
+      loginErr.textContent = d.error || d.detail || 'Login failed';
+    }
+  } catch (e) {
+    loginErr.textContent = 'Connection error — is the backend running?';
+  } finally {
+    loginBtn.disabled = false;
+  }
+}
+
+// ── Session init ─────────────────────────────────────────────────────────
+async function initSession() {
+  setStatus('Loading assistant…');
+  try {
+    const r = await fetch(`${BASE}/api/assistant/session`, { credentials: 'include' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const d = await r.json();
+    sessionId = d.session_id || d.id;
+    if (!sessionId) throw new Error('No session ID returned');
+
+    // Show model name if available
+    if (d.model) {
+      modelBadge.textContent = d.model;
+    }
+
+    showChat();
+    addSystem('Jarvis online. How can I assist?');
+  } catch (e) {
+    setStatus(`Session error: ${e.message}`);
+    setOrb('error');
+    addSystem(`⚠ Could not start session: ${e.message}`);
+    showChat();
+  }
+}
+
+// ── Chat streaming ────────────────────────────────────────────────────────
+async function sendMessage() {
+  const text = inputEl.value.trim();
+  if (!text || !sessionId) return;
+
+  inputEl.value = '';
+  inputEl.style.height = 'auto';
+  sendBtn.disabled = true;
+  inputEl.disabled = true;
+  stopBtn.classList.remove('hidden');
+  setOrb('thinking');
+  setStatus('Thinking…');
+
+  addMessage('user', text);
+
+  const assistantDiv = document.createElement('div');
+  assistantDiv.className = 'msg assistant';
+  const cursor = document.createElement('span');
+  cursor.className = 'cursor';
+  assistantDiv.appendChild(cursor);
+  conv.appendChild(assistantDiv);
+  conv.scrollTop = conv.scrollHeight;
+
+  let accumulated = '';
+
+  const fd = new FormData();
+  fd.append('message', text);
+  fd.append('session', sessionId);
+
+  try {
+    const resp = await fetch(`${BASE}/api/chat_stream`, {
+      method: 'POST',
+      credentials: 'include',
+      body: fd,
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ detail: `HTTP ${resp.status}` }));
+      throw new Error(err.detail || err.error || `HTTP ${resp.status}`);
+    }
+
+    const reader = resp.body.getReader();
+    activeReader = reader;
+    const dec = new TextDecoder();
+    let buf = '';
+
+    setOrb('streaming');
+    setStatus('Streaming…');
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const raw = line.slice(6).trim();
+        if (!raw || raw === '[DONE]') continue;
+
+        let evt;
+        try { evt = JSON.parse(raw); } catch { continue; }
+
+        if (evt.type === 'chunk' && evt.delta) {
+          accumulated += evt.delta;
+          assistantDiv.textContent = accumulated;
+          assistantDiv.appendChild(cursor);
+          conv.scrollTop = conv.scrollHeight;
+        } else if (evt.type === 'final' && evt.content) {
+          accumulated = evt.content;
+          assistantDiv.textContent = accumulated;
+          conv.scrollTop = conv.scrollHeight;
+        } else if (evt.type === 'model_info' && evt.model) {
+          modelBadge.textContent = evt.model;
+        }
+      }
+    }
+  } catch (e) {
+    if (e.name !== 'AbortError' && !e.message.includes('cancel')) {
+      const errText = e.message || 'Stream error';
+      if (accumulated) {
+        assistantDiv.textContent = accumulated;
+      } else {
+        assistantDiv.textContent = `⚠ ${errText}`;
+        assistantDiv.style.color = 'var(--err)';
+      }
+      setStatus(`Error: ${errText}`);
+      setOrb('error');
+    }
+  } finally {
+    // Remove cursor if still attached
+    cursor.remove();
+    activeReader = null;
+    sendBtn.disabled = false;
+    inputEl.disabled = false;
+    stopBtn.classList.add('hidden');
+    if (orb.className !== 'error') {
+      setOrb('idle');
+      setStatus('Ready');
+    }
+    conv.scrollTop = conv.scrollHeight;
+    inputEl.focus();
+  }
+}
+
+async function stopGeneration() {
+  if (activeReader) {
+    try { await activeReader.cancel(); } catch {}
+    activeReader = null;
+  }
+  if (sessionId) {
+    fetch(`${BASE}/api/chat/stop/${sessionId}`, {
+      method: 'POST',
+      credentials: 'include',
+    }).catch(() => {});
+  }
+  setOrb('idle');
+  setStatus('Stopped');
+  stopBtn.classList.add('hidden');
+  sendBtn.disabled = false;
+  inputEl.disabled = false;
+  inputEl.focus();
+}
+
+// ── Push-to-talk ──────────────────────────────────────────────────────────
+async function startRecording() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    audioChunks = [];
+    mediaRec = new MediaRecorder(stream);
+    mediaRec.ondataavailable = e => audioChunks.push(e.data);
+    mediaRec.onstop = async () => {
+      stream.getTracks().forEach(t => t.stop());
+      const blob = new Blob(audioChunks, { type: 'audio/webm' });
+      await transcribeAudio(blob);
+    };
+    mediaRec.start();
+    micBtn.classList.add('recording');
+    setOrb('listening');
+    setStatus('Listening…');
+  } catch (e) {
+    setStatus('Mic unavailable');
+    setOrb('error');
+    setTimeout(() => { setOrb('idle'); setStatus('Ready'); }, 2000);
+  }
+}
+
+function stopRecording() {
+  if (mediaRec && mediaRec.state !== 'inactive') {
+    mediaRec.stop();
+  }
+  micBtn.classList.remove('recording');
+  setOrb('thinking');
+  setStatus('Transcribing…');
+}
+
+async function transcribeAudio(blob) {
+  try {
+    const fd = new FormData();
+    fd.append('file', blob, 'recording.webm');
+    const r = await fetch(`${BASE}/api/stt/transcribe`, {
+      method: 'POST',
+      credentials: 'include',
+      body: fd,
+    });
+    if (!r.ok) throw new Error(`STT HTTP ${r.status}`);
+    const d = await r.json();
+    if (d.text && d.text.trim()) {
+      inputEl.value = d.text.trim();
+      autoGrow();
+      setStatus('Transcribed — press Enter to send');
+      setOrb('idle');
+      inputEl.focus();
+    } else {
+      setStatus('Nothing heard — try again');
+      setOrb('idle');
+    }
+  } catch (e) {
+    // STT may not be configured; degrade gracefully to text input
+    setStatus('STT unavailable — type your message');
+    setOrb('idle');
+  }
+}
+
+// ── Event wiring ──────────────────────────────────────────────────────────
+loginBtn.addEventListener('click', doLogin);
+usernameEl.addEventListener('keydown', e => { if (e.key === 'Enter') passwordEl.focus(); });
+passwordEl.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+
+sendBtn.addEventListener('click', sendMessage);
+inputEl.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+
+stopBtn.addEventListener('click', stopGeneration);
+
+// PTT: hold mic button
+micBtn.addEventListener('mousedown', e => { e.preventDefault(); startRecording(); });
+micBtn.addEventListener('mouseup',   e => { e.preventDefault(); stopRecording(); });
+micBtn.addEventListener('mouseleave', () => { if (mediaRec && mediaRec.state === 'recording') stopRecording(); });
+
+// Touch support for PTT
+micBtn.addEventListener('touchstart', e => { e.preventDefault(); startRecording(); }, { passive: false });
+micBtn.addEventListener('touchend',   e => { e.preventDefault(); stopRecording();  }, { passive: false });
+
+// Hide button (minimize to tray; Rust side handles the actual hide)
+hideBtn.addEventListener('click', () => {
+  window.close();  // triggers the Rust CloseRequested handler → hides window
+});
+
+// ── Boot ──────────────────────────────────────────────────────────────────
+(async function init() {
+  setOrb('thinking');
+  setStatus('Checking connection…');
+  const authed = await checkAuth();
+  if (authed) {
+    await initSession();
+  } else {
+    showLogin();
+  }
+})();
+</script>
+</body>
+</html>

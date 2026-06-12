@@ -18,6 +18,21 @@
         "height": 920,
         "resizable": true,
         "visible": false
+      },
+      {
+        "label": "jarvis-widget",
+        "url": "http://127.0.0.1:7000/static/jarvis-widget.html",
+        "title": "Jarvis",
+        "width": 380,
+        "height": 560,
+        "minWidth": 280,
+        "minHeight": 300,
+        "resizable": true,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true
       }
     ],
     "security": {

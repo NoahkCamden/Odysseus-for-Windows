@@ -7,7 +7,12 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use tauri::Manager;
+use tauri::{
+    menu::{Menu, MenuItem, PredefinedMenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Manager, PhysicalPosition, WindowEvent,
+};
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 const BACKEND_HOST: &str = "127.0.0.1";
 const BACKEND_PORT: &str = "7000";
@@ -214,8 +219,10 @@ fn stop_backend(state: &BackendState) {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(BackendState::default())
         .setup(|app| {
+            // ── 1. Start / attach backend ─────────────────────────────────────
             {
                 let state = app.state::<BackendState>();
                 let child = ensure_backend().map_err(std::io::Error::other)?;
@@ -223,13 +230,130 @@ fn main() {
                     *guard = child;
                 };
             }
+
+            // ── 2. Show main Odysseus window ──────────────────────────────────
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
             }
+
+            // ── 3. Position Jarvis widget in the bottom-right corner ──────────
+            if let Some(widget) = app.get_webview_window("jarvis-widget") {
+                // Try to snap to bottom-right, above the Windows taskbar (~48 px).
+                if let Ok(Some(monitor)) = widget.primary_monitor() {
+                    let screen = monitor.size();
+                    let scale = monitor.scale_factor();
+                    let w_logical = 380.0_f64;
+                    let h_logical = 560.0_f64;
+                    let w_px = (w_logical * scale) as i32;
+                    let h_px = (h_logical * scale) as i32;
+                    let margin_right = (20.0 * scale) as i32;
+                    let margin_bottom = (60.0 * scale) as i32; // above taskbar
+                    let x = screen.width as i32 - w_px - margin_right;
+                    let y = screen.height as i32 - h_px - margin_bottom;
+                    let _ = widget.set_position(PhysicalPosition::new(x, y));
+                }
+
+                // Hide instead of closing so the widget persists in the tray.
+                let widget_hide = widget.clone();
+                widget.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = widget_hide.hide();
+                    }
+                });
+            }
+
+            // ── 4. Global hotkey: Ctrl+Alt+Space → toggle widget ─────────────
+            let hotkey =
+                Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::Space);
+            let app_handle = app.handle().clone();
+            if let Err(e) = app.global_shortcut().on_shortcut(
+                hotkey,
+                move |_app, _shortcut, event| {
+                    if event.state() == ShortcutState::Pressed {
+                        if let Some(w) = app_handle.get_webview_window("jarvis-widget") {
+                            if w.is_visible().unwrap_or(false) {
+                                let _ = w.hide();
+                            } else {
+                                let _ = w.show();
+                                let _ = w.set_focus();
+                            }
+                        }
+                    }
+                },
+            ) {
+                eprintln!(
+                    "[Jarvis] Could not register Ctrl+Alt+Space hotkey: {}. \
+                     Use the tray icon to show/hide instead.",
+                    e
+                );
+            }
+
+            // ── 5. System tray ────────────────────────────────────────────────
+            let show_item =
+                MenuItem::with_id(app, "show_widget", "Show Jarvis", true, None::<&str>)?;
+            let hide_item =
+                MenuItem::with_id(app, "hide_widget", "Hide Jarvis", true, None::<&str>)?;
+            let open_main =
+                MenuItem::with_id(app, "open_main", "Open Full App", true, None::<&str>)?;
+            let sep = PredefinedMenuItem::separator(app)?;
+            let quit_item = MenuItem::with_id(app, "quit", "Quit Jarvis", true, None::<&str>)?;
+
+            let menu = Menu::with_items(
+                app,
+                &[&show_item, &hide_item, &open_main, &sep, &quit_item],
+            )?;
+
+            TrayIconBuilder::new()
+                .icon(app.default_window_icon().unwrap().clone())
+                .menu(&menu)
+                .tooltip("Jarvis — Ctrl+Alt+Space to toggle")
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show_widget" => {
+                        if let Some(w) = app.get_webview_window("jarvis-widget") {
+                            let _ = w.show();
+                            let _ = w.set_focus();
+                        }
+                    }
+                    "hide_widget" => {
+                        if let Some(w) = app.get_webview_window("jarvis-widget") {
+                            let _ = w.hide();
+                        }
+                    }
+                    "open_main" => {
+                        if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.show();
+                            let _ = w.set_focus();
+                        }
+                    }
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    // Left-click the tray icon → toggle widget visibility.
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        let app = tray.app_handle();
+                        if let Some(w) = app.get_webview_window("jarvis-widget") {
+                            if w.is_visible().unwrap_or(false) {
+                                let _ = w.hide();
+                            } else {
+                                let _ = w.show();
+                                let _ = w.set_focus();
+                            }
+                        }
+                    }
+                })
+                .build(app)?;
+
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("error while building Odysseus desktop shell")
+        .expect("error while building Jarvis desktop shell")
         .run(|app_handle, event| {
             if matches!(event, tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }) {
                 let state = app_handle.state::<BackendState>();
